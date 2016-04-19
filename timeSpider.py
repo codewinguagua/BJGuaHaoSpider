@@ -3,6 +3,11 @@
 import re
 import urllib.request
 import urllib.error
+from urllib import parse
+import json
+import datetime
+import time
+import Validator
 
 # 获取时间信息
 class timeSpider:
@@ -11,10 +16,16 @@ class timeSpider:
     def __init__(self, baseUrl):
         # base链接
         self.baseUrl = baseUrl
+        # 医院ID
+        self.hospitalId = None
+        # 科室ID
+        self.departmentId = None
         # 存放可预约天数,默认一周(7天)
         self.days = 7
         # 存放日期列表
         self.dates = []
+        # 获取挂号详情信息的url
+        self.postUrl = 'http://www.bjguahao.gov.cn/dpt/partduty.htm'
 
     # 获取页面编码
     def loadPage(self, subPath):
@@ -40,7 +51,6 @@ class timeSpider:
 
     # 抓取指定日期下的可预约号信息
     def getInformationInDate(self, pageCode, day, colnum):
-        dayInfo = {}
         # 正则表达式对象
         value1 = '1_%s' % day      # 上午
         value2 = '2_%s' % day      # 下午
@@ -62,33 +72,60 @@ class timeSpider:
                          '.*?name="%s".*?>(.*?)value=".*?%s".*?</tr>' \
                          '.*?name="%s".*?>(.*?)value=".*?%s".*?</tr>' \
                          '.*?name="%s".*?>(.*?)value=".*?%s".*?</tr>' % (name, value1, name, value2, name, value3)
-            '''patternstr = '<div class="ksorder_cen_l_t_c"' \
-                         '.*?name="%s".*?>(.*?)value=' % name'''
+
             # print patternstr
             pattern = re.compile(patternstr, re.S)
             items = re.findall(pattern, pageCode)
 
+        return self.parseResult(items, day)
+
+    # 模拟post方法
+    def post(self, url, args):
+        # 构建参数
+        data = parse.urlencode(args)
+        data = data.encode('ascii')
+        # request对象
+        req = urllib.request.Request(url, data=data)
+        with urllib.request.urlopen(req) as response:
+            the_page = response.read().decode('utf-8')
+
+        data = json.loads(the_page)
+        # print(data['data'][0]['doctorTitleName'])
+        return data['data'][0]
+
+    # 分析可预约号匹配结果并返回
+    def parseResult(self, items, day):
         # 分析匹配结果
+        dayInfo = {}
         for item in items:
             for i in range(0, 3):
                 haveKYY = re.search('ksorder_kyy', item[i])
                 leastnum = 0
+                keyname = '%d_%s' % (4 if i == 2 else i, day)
                 if haveKYY:
                     # 抓取剩余可预约数量
                     pattern = re.compile(u'剩余:(.*?)<input', re.S)
                     leastnum = int(re.search(pattern, item[i]).group(1).strip())
+                    # 抓取挂号费等详细信息
+                    self.getDetail(4 if i == 2 else i, day)
 
-                if i == 0:
-                    print('%s\t%d' % (value1, leastnum))
-                    dayInfo[value1] = leastnum
-                elif i == 1:
-                    print('%s\t%d' % (value2, leastnum))
-                    dayInfo[value2] = leastnum
-                else:
-                    print('%s\t%d' % (value3, leastnum))
-                    dayInfo[value3] = leastnum
+                dayInfo[keyname] = leastnum
 
         return dayInfo
+
+    # 如果存在可预约号则调用该方法获取挂号费等信息
+    def getDetail(self, dutycode, dutydate):
+        args = {}
+        args['hospitalId'] = self.hospitalId
+        args['departmentId'] = self.departmentId
+        args['dutyCode'] = 2 if dutycode == 1 else 1
+        args['dutyDate'] = dutydate
+        args['isAjax'] = 'true'
+
+        data = self.post(self.postUrl, args)
+
+        print('医生：%s\t擅长：%s\t挂号费：￥%s\t剩余：%s' % (data['doctorTitleName'], data['skill'], data['totalFee'], data['remainAvailableNumber']))
+        return [data['doctorTitleName'], data['skill'], data['totalFee'], data['remainAvailableNumber']]
 
     # 取出可预约的日期列表
     def getKYYDate(self, pageCode):
@@ -125,10 +162,22 @@ class timeSpider:
             link = result.group(1).strip()
             print(link)
 
+            if not Validator.compileurl(self.baseUrl + link):
+                link = self.combineUrlComponent(link)
             pageCode = self.loadPage(link)
             self.getKYYDate(pageCode)
             # 可预约周数减1
             weeknum -= 1
+
+    # 组装url
+    def combineUrlComponent(self, item):
+        subItem = item[len('javascript:urlEncodeing('):len(item)-1].split(',')
+        subPath = '/dpt/appoints/%s,%s.htm?week=%s&departmentName=%s' % (subItem[0].strip('\''),
+                                                                             subItem[1].strip('\''),
+                                                                             urllib.parse.quote(subItem[2].strip('\'').encode('utf-8')),
+                                                                             urllib.parse.quote(subItem[3].strip('\'').encode('utf-8')))
+
+        return subPath
 
     # 获取预约周期
     def getKYYDays(self, pageCode):
@@ -142,7 +191,10 @@ class timeSpider:
         return result.group(1).strip()
 
     # 开始方法
-    def start(self, subPath):
+    def start(self, subPath, hospital_id, department_id):
+        self.subPath = subPath
+        self.hospitalId = hospital_id
+        self.departmentId = department_id
         # 抓取网页
         pageCode = self.loadPage(subPath)
         # 抓取每天的日期信息
@@ -150,13 +202,20 @@ class timeSpider:
             print('抓取网页失败')
             return None
 
-        # self.getInformationInDate(pageCode, '2016-03-08', 0)
+        self.getInformationInDate(pageCode, '2016-03-19', 0)
         # self.getKYYDate(pageCode)
-        self.getAllKYYDate(pageCode)
+        # self.getAllKYYDate(pageCode)
 
         return self.dates
 
+gl_begin_time = datetime.datetime.now()
+gl_end_time = gl_begin_time + datetime.timedelta(minutes=60)
 if __name__ == '__main__':
-    baseUrl = 'http://www.bjguahao.gov.cn'
-    ts = timeSpider(baseUrl)
-    ts.start('/dpt/appoint/3-200000002.htm')
+    while datetime.datetime.now() < gl_end_time:
+        baseUrl = 'http://www.bjguahao.gov.cn'
+        ts = timeSpider(baseUrl)
+        ts.start('/dpt/appoint/225-200003594.htm', '225', '200003594')
+        print(datetime.datetime.now())
+        time.sleep(0.1)
+    print('\n\n\nend\n\n\n')
+
